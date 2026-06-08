@@ -53,6 +53,13 @@ function getSetting($key) { global $db; $s=$db->prepare("SELECT value FROM setti
 $action = $_GET['action'] ?? 'home';
 $response = ['error'=>''];
 
+// Logout action
+if ($action === 'logout' && isLoggedIn()) {
+    session_destroy();
+    header('Location: index.php');
+    exit;
+}
+
 // Handle POST actions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'login') {
@@ -75,7 +82,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $u = trim($_POST['username'] ?? '');
             $p = $_POST['password'] ?? '';
             $dn = trim($_POST['display_name'] ?? '');
-            if (strlen($u)<3 || strlen($p)<4) { $response['error'] = 'Username at least 3 characters and password at least 4 characters'; }
+            if (strlen($u)<3 || strlen($p)<4) { $response['error'] = 'Username must be at least 3 characters and password at least 4 characters'; }
             else {
                 $hash = password_hash($p, PASSWORD_DEFAULT);
                 try {
@@ -108,7 +115,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (isset($_FILES['avatar']) && $_FILES['avatar']['error'] === UPLOAD_ERR_OK) {
             $ext = strtolower(pathinfo($_FILES['avatar']['name'], PATHINFO_EXTENSION));
             if (!in_array($ext, ['jpg','jpeg','png','gif','webp'])) { $response['error'] = 'Allowed formats: jpg, png, gif, webp'; }
-            elseif ($_FILES['avatar']['size'] > 512000) { $response['error'] = 'Avatar size must be max 500 kilobytes'; }
+            elseif ($_FILES['avatar']['size'] > 512000) { $response['error'] = 'Avatar size must be maximum 500 KB'; }
             else {
                 $avatarName = 'avatar_'.$_SESSION['user_id'].'_'.time().'.'.$ext;
                 move_uploaded_file($_FILES['avatar']['tmp_name'], 'uploads/'.$avatarName);
@@ -198,14 +205,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($name) $db->prepare("UPDATE groups SET name=?, sort_order=? WHERE id=?")->execute([$name, $sort, $gid]);
     } elseif ($action === 'join_group' && isLoggedIn()) {
         $gid = (int)($_POST['group_id'] ?? 0);
-        // Check if public join allowed (for now, any non-channel group)
-        $grp = $db->prepare("SELECT type FROM groups WHERE id=?");
-        $grp->execute([$gid]);
-        $g = $grp->fetch();
-        if ($g && $g['type'] === 'channel') { $response['error'] = 'Channel only by admin invitation'; }
-        else {
-            $db->prepare("INSERT OR IGNORE INTO group_members (user_id,group_id) VALUES (?,?)")->execute([$_SESSION['user_id'], $gid]);
-        }
+        // Allow anyone to join both groups and channels
+        $db->prepare("INSERT OR IGNORE INTO group_members (user_id,group_id) VALUES (?,?)")->execute([$_SESSION['user_id'], $gid]);
     } elseif ($action === 'leave_group' && isLoggedIn()) {
         $gid = (int)($_POST['group_id'] ?? 0);
         // Cannot leave if last admin? Fallback: allow leave
@@ -251,25 +252,55 @@ $currentGroup = isset($_GET['group']) ? (int)$_GET['group'] : 0;
                 <?php if (isAdmin()): ?>
                     <a href="index.php?action=admin" class="nav-link">Admin</a>
                 <?php endif; ?>
-                <a href="index.php?action=logout" class="nav-link" target="_blank">Logout</a>
+                <a href="index.php?action=logout" class="nav-link">Logout</a>
             </nav>
-            <form id="logout-form" method="post" action="index.php?action=logout" style="display:none">
-                <input type="hidden" name="csrf" value="">
-            </form>
             <?php endif; ?>
-            <!-- Group list -->
+            
+            <!-- My Channels & Groups Section in Sidebar -->
             <div class="group-list">
-                <h3>Groups</h3>
                 <?php if (isLoggedIn()):
-                    $groups = $db->prepare("SELECT g.*, (SELECT COUNT(*) FROM group_members WHERE group_id=g.id) as member_count FROM groups g JOIN group_members m ON g.id=m.group_id WHERE m.user_id=? ORDER BY g.sort_order, g.name");
+                    // Get user's channels
+                    $channels = $db->prepare("SELECT g.*, (SELECT COUNT(*) FROM group_members WHERE group_id=g.id) as member_count FROM groups g JOIN group_members m ON g.id=m.group_id WHERE m.user_id=? AND g.type='channel' ORDER BY g.sort_order, g.name");
+                    $channels->execute([$_SESSION['user_id']]);
+                    
+                    // Get user's groups
+                    $groups = $db->prepare("SELECT g.*, (SELECT COUNT(*) FROM group_members WHERE group_id=g.id) as member_count FROM groups g JOIN group_members m ON g.id=m.group_id WHERE m.user_id=? AND g.type='group' ORDER BY g.sort_order, g.name");
                     $groups->execute([$_SESSION['user_id']]);
-                    foreach ($groups as $g): ?>
+                    
+                    // Display Channels section (always show)
+                    ?>
+                    <h3>My Channels</h3>
+                    <?php 
+                    $hasChannels = false;
+                    foreach ($channels as $g):
+                        $hasChannels = true;
+                    ?>
                         <a href="index.php?group=<?= $g['id'] ?>" class="group-item <?= $currentGroup==$g['id']?'active':'' ?>">
-                            <span><?= htmlspecialchars($g['name']) ?></span>
+                            <span># <?= htmlspecialchars($g['name']) ?></span>
                             <span class="badge"><?= $g['member_count'] ?></span>
                         </a>
                     <?php endforeach; ?>
-                <?php endif; ?>
+                    <?php if (!$hasChannels): ?>
+                        <p class="empty-message" style="font-size:0.8em; color:#888; padding:5px 10px;">No channels joined yet.</p>
+                    <?php endif;
+                    
+                    // Display Groups section (always show)
+                    ?>
+                    <h3>My Groups</h3>
+                    <?php 
+                    $hasGroups = false;
+                    foreach ($groups as $g):
+                        $hasGroups = true;
+                    ?>
+                        <a href="index.php?group=<?= $g['id'] ?>" class="group-item <?= $currentGroup==$g['id']?'active':'' ?>">
+                            <span>📌 <?= htmlspecialchars($g['name']) ?></span>
+                            <span class="badge"><?= $g['member_count'] ?></span>
+                        </a>
+                    <?php endforeach; ?>
+                    <?php if (!$hasGroups): ?>
+                        <p class="empty-message" style="font-size:0.8em; color:#888; padding:5px 10px;">No groups joined yet.</p>
+                    <?php endif;
+                endif; ?>
             </div>
         </aside>
 
@@ -364,11 +395,15 @@ $currentGroup = isset($_GET['group']) ? (int)$_GET['group'] : 0;
         </div>
         
         <hr>
+        
+        <!-- All Channels Section -->
         <div class="group-list-all">
-            <h3>All Groups & Channels</h3>
+            <h3>All Channels</h3>
             <?php 
-            $allGroups = $db->query("SELECT g.*, (SELECT COUNT(*) FROM group_members WHERE group_id=g.id) as member_count FROM groups g ORDER BY g.sort_order, g.name");
-            foreach ($allGroups as $g):
+            $allChannels = $db->query("SELECT g.*, (SELECT COUNT(*) FROM group_members WHERE group_id=g.id) as member_count FROM groups g WHERE g.type='channel' ORDER BY g.sort_order, g.name");
+            $hasChannels = false;
+            foreach ($allChannels as $g):
+                $hasChannels = true;
                 // Check membership
                 $check = $db->prepare("SELECT 1 FROM group_members WHERE user_id=? AND group_id=?");
                 $check->execute([$_SESSION['user_id'], $g['id']]);
@@ -376,8 +411,8 @@ $currentGroup = isset($_GET['group']) ? (int)$_GET['group'] : 0;
             ?>
             <div class="group-card">
                 <div>
-                    <strong><?= htmlspecialchars($g['name']) ?></strong>
-                    <span class="badge"><?= $g['type'] === 'channel' ? 'Channel' : 'Group' ?></span>
+                    <strong># <?= htmlspecialchars($g['name']) ?></strong>
+                    <span class="badge">Channel</span>
                     <span class="member-count"><?= $g['member_count'] ?> members</span>
                 </div>
                 <div>
@@ -396,6 +431,49 @@ $currentGroup = isset($_GET['group']) ? (int)$_GET['group'] : 0;
                 </div>
             </div>
             <?php endforeach; ?>
+            <?php if (!$hasChannels): ?>
+                <p class="empty-message">No channels yet. Create one!</p>
+            <?php endif; ?>
+        </div>
+        
+        <!-- All Groups Section -->
+        <div class="group-list-all">
+            <h3>All Groups</h3>
+            <?php 
+            $allGroups = $db->query("SELECT g.*, (SELECT COUNT(*) FROM group_members WHERE group_id=g.id) as member_count FROM groups g WHERE g.type='group' ORDER BY g.sort_order, g.name");
+            $hasGroups = false;
+            foreach ($allGroups as $g):
+                $hasGroups = true;
+                // Check membership
+                $check = $db->prepare("SELECT 1 FROM group_members WHERE user_id=? AND group_id=?");
+                $check->execute([$_SESSION['user_id'], $g['id']]);
+                $isMember = $check->fetch();
+            ?>
+            <div class="group-card">
+                <div>
+                    <strong>📌 <?= htmlspecialchars($g['name']) ?></strong>
+                    <span class="badge">Group</span>
+                    <span class="member-count"><?= $g['member_count'] ?> members</span>
+                </div>
+                <div>
+                    <?php if ($isMember): ?>
+                        <form method="post" action="index.php?action=leave_group" style="display:inline">
+                            <input type="hidden" name="group_id" value="<?= $g['id'] ?>">
+                            <button type="submit" class="btn-small btn-danger">Leave</button>
+                        </form>
+                        <a href="index.php?group=<?= $g['id'] ?>" class="btn-small">Enter</a>
+                    <?php else: ?>
+                        <form method="post" action="index.php?action=join_group" style="display:inline">
+                            <input type="hidden" name="group_id" value="<?= $g['id'] ?>">
+                            <button type="submit" class="btn-small">Join</button>
+                        </form>
+                    <?php endif; ?>
+                </div>
+            </div>
+            <?php endforeach; ?>
+            <?php if (!$hasGroups): ?>
+                <p class="empty-message">No groups yet. Create one!</p>
+            <?php endif; ?>
         </div>
     </div>
 
@@ -451,11 +529,12 @@ $currentGroup = isset($_GET['group']) ? (int)$_GET['group'] : 0;
             <h3>Groups & Channels</h3>
             <div class="admin-list">
                 <?php 
-                $groups = $db->query("SELECT * FROM groups ORDER BY sort_order, name");
+                $groups = $db->query("SELECT * FROM groups ORDER BY type DESC, sort_order, name");
                 foreach ($groups as $g): ?>
                 <div class="admin-item">
                     <form method="post" action="index.php?action=admin_edit_group" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
                         <input type="hidden" name="group_id" value="<?= $g['id'] ?>">
+                        <span class="group-type-badge"><?= $g['type'] === 'channel' ? '#' : '📌' ?></span>
                         <input type="text" name="name" value="<?= htmlspecialchars($g['name']) ?>" style="width:200px">
                         <input type="number" name="sort_order" value="<?= $g['sort_order'] ?>" style="width:60px" placeholder="Sort Order">
                         <button type="submit" class="btn-small">Save</button>
@@ -478,11 +557,10 @@ $currentGroup = isset($_GET['group']) ? (int)$_GET['group'] : 0;
             $msgs = $db->prepare("SELECT m.*, u.display_name as uname, u.avatar as uavatar FROM messages m JOIN users u ON m.user_id=u.id WHERE m.group_id=? ORDER BY m.created_at ASC LIMIT 200");
             $msgs->execute([$currentGroup]);
             foreach ($msgs as $msg):
-                /* START DATE FORMATTING */
+                // Global date formatting
                 $dt = new DateTime($msg['created_at'] ?? 'now', new DateTimeZone('UTC'));
                 $dt->setTimezone(new DateTimeZone('UTC'));
                 $dateTime = $dt->format('Y-m-d H:i:s');
-                /* END DATE FORMATTING */
                 $isOwn = $msg['user_id'] == $_SESSION['user_id'];
             ?>
             <div class="message <?= $isOwn ? 'own' : '' ?>">
@@ -496,8 +574,6 @@ $currentGroup = isset($_GET['group']) ? (int)$_GET['group'] : 0;
                 <?php endif; ?>
                 <?php if ($msg['file_path']): 
                     $imgExts = ['jpg','jpeg','png','gif','webp'];
-                    $vidExts = ['mp4','webm','ogg'];
-                    $audExts = ['mp3','wav'];
                     $isImg = in_array($msg['file_type'], $imgExts);
                 ?>
                     <div class="msg-attachment">
@@ -523,10 +599,21 @@ $currentGroup = isset($_GET['group']) ? (int)$_GET['group'] : 0;
         $isMemberCheck->execute([$_SESSION['user_id'], $currentGroup]);
         $isMember = $isMemberCheck->fetch();
         if ($isMember): 
-        $grpCheck = $db->prepare("SELECT type FROM groups WHERE id=?");
+        $grpCheck = $db->prepare("SELECT type, creator_id FROM groups WHERE id=?");
         $grpCheck->execute([$currentGroup]);
         $grp = $grpCheck->fetch();
-        $canSend = $grp && $grp['type'] === 'channel' ? false : true; // simplify: only group can send, channels read-only
+        
+        // Check if user can send messages
+        // For channels: only creator or admin can send
+        // For groups: all members can send
+        $isCreator = ($grp && $grp['creator_id'] == $_SESSION['user_id']);
+        $isAdminUser = isAdmin();
+        if ($grp && $grp['type'] === 'channel') {
+            $canSend = ($isCreator || $isAdminUser);
+        } else {
+            $canSend = true;
+        }
+        
         if ($canSend): ?>
         <form method="post" action="index.php?action=send_message" enctype="multipart/form-data" class="message-form">
             <input type="hidden" name="group_id" value="<?= $currentGroup ?>">
@@ -541,7 +628,7 @@ $currentGroup = isset($_GET['group']) ? (int)$_GET['group'] : 0;
             <div id="file-name-display" style="font-size:0.8em;padding:4px;"></div>
         </form>
         <?php else: ?>
-            <p style="text-align:center;padding:10px;color:#888;">This channel is read-only</p>
+            <p style="text-align:center;padding:10px;color:#888;">This channel is read-only. Only the creator and admins can send messages.</p>
         <?php endif; endif; ?>
     </div>
 
@@ -566,11 +653,3 @@ $currentGroup = isset($_GET['group']) ? (int)$_GET['group'] : 0;
     <script src="script.js"></script>
 </body>
 </html>
-<?php 
-// Logout action
-if ($action === 'logout' && isLoggedIn()) {
-    session_destroy();
-    header('Location: index.php');
-    exit;
-}
-?>
